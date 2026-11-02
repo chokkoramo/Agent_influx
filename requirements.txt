@@ -1,0 +1,4 @@
+streamlit>=1.40
+influxdb-client>=1.46
+anthropic>=0.60
+pandas>=2.0
