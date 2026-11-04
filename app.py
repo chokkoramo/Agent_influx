@@ -40,18 +40,28 @@ def graficar(df: pd.DataFrame):
         tabla = df.pivot_table(index="_time", columns="serie", values="_value")
     else:
         tabla = df.set_index("_time")[["_value"]]
-    st.line_chart(tabla)
+    tab_lineas, tab_area = st.tabs(["📈 Líneas", "🌊 Área"])
+    with tab_lineas:
+        st.line_chart(tabla)
+    with tab_area:
+        st.area_chart(tabla)
 
 
 def correr_agente(historial: list) -> tuple[str, list]:
     """Ejecuta el ciclo de tool use. Devuelve (texto_final, pasos)."""
     llm = get_llm(st.session_state.api_key)
     pasos = []
+    tarifa = st.session_state.get("tarifa_kwh", 850.0)
+    system_dinamico = (
+        f"{SYSTEM}\n\n"
+        f"La tarifa actual de energía es de ${tarifa} por kWh. "
+        f"Úsala para calcular y estimar costos en dinero cuando sea requerido o el usuario lo solicite."
+    )
     for _ in range(MAX_PASOS):
         resp = llm.messages.create(
             model=st.session_state.modelo,
             max_tokens=2048,
-            system=SYSTEM,
+            system=system_dinamico,
             tools=TOOLS,
             messages=historial,
         )
@@ -82,14 +92,28 @@ def correr_agente(historial: list) -> tuple[str, list]:
     return "Se alcanzó el máximo de pasos sin una respuesta final.", pasos
 
 
-def mostrar_pasos(pasos: list):
+def mostrar_pasos(pasos: list, key_prefix: str = ""):
     for p in pasos:
         with st.expander(
             f"🔧 {p['tool']}({', '.join(f'{k}={v}' for k, v in p['args'].items())})"
         ):
             st.json(p["salida"])
-    for p in pasos:
-        graficar(p["df"])
+    for idx, p in enumerate(pasos):
+        df = p.get("df")
+        if df is not None and not df.empty:
+            graficar(df)
+            key_btn = (
+                f"descarga_csv_{key_prefix}_{idx}"
+                if key_prefix
+                else f"descarga_csv_{idx}"
+            )
+            st.download_button(
+                label="📥 Descargar datos (CSV)",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name=f"datos_paso_{idx}.csv",
+                mime="text/csv",
+                key=key_btn,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +122,7 @@ def mostrar_pasos(pasos: list):
 if "historial" not in st.session_state:
     st.session_state.historial = []  # mensajes en formato API
     st.session_state.chat = []  # lo que se muestra en pantalla
+    st.session_state.tarifa_kwh = 850.0
 
 # ---------------------------------------------------------------------------
 # Barra lateral
@@ -119,6 +144,10 @@ with st.sidebar:
         st.caption(
             "Las credenciales solo viven en esta sesión del navegador; no se guardan."
         )
+
+    st.session_state.tarifa_kwh = st.number_input(
+        "Precio por kWh ($)", value=850.0
+    )
 
     st.session_state.influx = {"url": url, "token": token, "org": org, "bucket": bucket}
     listo = all(st.session_state.influx.values()) and bool(st.session_state.api_key)
@@ -149,15 +178,29 @@ with st.sidebar:
         st.session_state.chat = []
         st.rerun()
 
+    if st.session_state.chat:
+        lineas = []
+        for msg in st.session_state.chat:
+            rol = "Usuario" if msg["role"] == "user" else "Agente"
+            lineas.append(f"{rol}: {msg['texto']}")
+        historial_texto = "\n\n".join(lineas)
+        st.download_button(
+            label="📥 Exportar historial",
+            data=historial_texto,
+            file_name="analisis_consumo.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
 st.title("Asistente de consumo eléctrico")
 
-for msg in st.session_state.chat:
+for idx_msg, msg in enumerate(st.session_state.chat):
     with st.chat_message(msg["role"]):
         if msg.get("pasos"):
-            mostrar_pasos(msg["pasos"])
+            mostrar_pasos(msg["pasos"], key_prefix=f"chat_{idx_msg}")
         st.markdown(msg["texto"])
 
 if not listo:
@@ -184,7 +227,7 @@ if pregunta:
                 texto, pasos = f"Error con el modelo: {e}", []
                 # descarta la pregunta fallida para no dejar el historial a medias
                 del st.session_state.historial[n_previo:]
-        mostrar_pasos(pasos)
+        mostrar_pasos(pasos, key_prefix=f"chat_{len(st.session_state.chat)}")
         st.markdown(texto)
 
     st.session_state.chat.append({"role": "assistant", "texto": texto, "pasos": pasos})
